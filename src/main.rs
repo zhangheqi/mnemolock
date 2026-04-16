@@ -11,12 +11,12 @@ use crossterm::QueueableCommand;
 use mnemolock::{EncryptedMnemonic24, EncryptedMnemonic36};
 
 enum EditPwd {
-    Pwd(String),
+    Submit,
     Reload,
     Exit,
 }
 
-fn edit_pwd(mask: &str) -> io::Result<EditPwd> {
+fn edit_pwd(buf: &mut String, mask: &str) -> io::Result<EditPwd> {
     let mut stdout = io::stdout();
 
     terminal::enable_raw_mode()?;
@@ -26,7 +26,11 @@ fn edit_pwd(mask: &str) -> io::Result<EditPwd> {
     defer!(io::stdout().execute(terminal::EnableLineWrap));
 
     let mut cursor_checkpoints = Vec::new();
-    let mut buf = String::new();
+
+    for _ in 0..buf.chars().count() {
+        cursor_checkpoints.push(cursor::position()?);
+        stdout.execute(style::Print(mask))?;
+    }
 
     loop {
         match event::read()? {
@@ -44,7 +48,7 @@ fn edit_pwd(mask: &str) -> io::Result<EditPwd> {
                     stdout.queue(cursor::MoveTo(pos.0, pos.1))?;
                     stdout.execute(terminal::Clear(ClearType::UntilNewLine))?;
                 }
-                KeyCode::Enter => return Ok(EditPwd::Pwd(buf)),
+                KeyCode::Enter => return Ok(EditPwd::Submit),
                 KeyCode::Esc => return Ok(EditPwd::Exit),
                 _ => (),
             }
@@ -122,9 +126,7 @@ impl WordNo {
     }
 
     fn print_prompt(&self) {
-        let left_arrow = if self.0 <= WordNo::MIN { " " } else { "◀︎" };
-        let right_arrow = if self.0 >= WordNo::MAX { " " } else { "▶︎" };
-        print_prompt(&format!("Word {} {} {}", left_arrow, self.0, right_arrow));
+        print_prompt(&format!("Word {:#04x}", self.0));
     }
 
     fn increment(&mut self) {
@@ -154,7 +156,7 @@ fn print_title(text: &str) {
 }
 
 fn print_prompt(text: &str) {
-    print!(" ({text}) ");
+    print!("    {text}: ");
 }
 
 struct InputFrame {
@@ -184,7 +186,7 @@ impl InputFrame {
     }
 
     fn reload_with_error(text: &str) -> io::Result<()> {
-        Self::print_bottom(&format!(" {text} ").white().on_red().to_string())
+        Self::print_bottom(&format!(" {text} ").on_red().white().to_string())
     }
 
     fn reload(&self) -> io::Result<()> {
@@ -216,7 +218,7 @@ impl InputFrame {
         // `cursor::MoveToNextLine(1)` is wrong, because the next line may not exist
         stdout.queue(style::Print("\n"))?;
         stdout.queue(terminal::DisableLineWrap)?;
-        stdout.queue(style::Print(text))?;
+        stdout.queue(style::Print(format!("    {text}")))?;
         stdout.queue(terminal::EnableLineWrap)?;
         stdout.execute(cursor::MoveToPreviousLine(1))?;
         Ok(())
@@ -308,10 +310,11 @@ fn main() -> io::Result<()> {
         );
         frame.init()?;
         loop {
-            let (pwd, words) = loop {
+            let mut pwd = String::new();
+            let words = loop {
                 print_prompt("Enter Password");
-                match edit_pwd(mask)? {
-                    EditPwd::Pwd(pwd) => {
+                match edit_pwd(&mut pwd, mask)? {
+                    EditPwd::Submit => {
                         let result = match mnemonic_type {
                             MnemonicType::Mnemonic24 => EncryptedMnemonic24::new(&mnemonic, pwd.as_bytes())
                                 .map(|x| x.words().to_vec()),
@@ -321,7 +324,7 @@ fn main() -> io::Result<()> {
                         match result {
                             Ok(words) => {
                                 frame.reload()?;
-                                break (pwd, words);
+                                break words;
                             }
                             Err(_) => InputFrame::reload_with_error("Please choose another password.")?,
                         }
@@ -330,12 +333,13 @@ fn main() -> io::Result<()> {
                     EditPwd::Exit => InputFrame::exit(),
                 }
             };
-            let repeat_pwd = loop {
+            let mut repeat_pwd = String::new();
+            loop {
                 print_prompt("Repeat Password");
-                match edit_pwd(mask)? {
-                    EditPwd::Pwd(pwd) => {
+                match edit_pwd(&mut repeat_pwd, mask)? {
+                    EditPwd::Submit => {
                         frame.reload()?;
-                        break pwd;
+                        break;
                     }
                     EditPwd::Reload => frame.reload()?,
                     EditPwd::Exit => InputFrame::exit(),
