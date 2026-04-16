@@ -1,7 +1,7 @@
 mod util;
 
 use std::cmp::Ordering;
-use std::io;
+use std::{io, process};
 use bip39::Mnemonic;
 use crossterm::{ExecutableCommand, cursor};
 use crossterm::event::{self, Event, KeyCode};
@@ -13,6 +13,7 @@ use mnemolock::{EncryptedMnemonic24, EncryptedMnemonic36};
 enum EditPwd {
     Pwd(String),
     Reload,
+    Exit,
 }
 
 fn edit_pwd(mask: &str) -> io::Result<EditPwd> {
@@ -44,6 +45,7 @@ fn edit_pwd(mask: &str) -> io::Result<EditPwd> {
                     stdout.execute(terminal::Clear(ClearType::UntilNewLine))?;
                 }
                 KeyCode::Enter => return Ok(EditPwd::Pwd(buf)),
+                KeyCode::Esc => return Ok(EditPwd::Exit),
                 _ => (),
             }
             Event::Resize(..) => return Ok(EditPwd::Reload),
@@ -58,6 +60,7 @@ enum EditWord {
     Next,
     Submit,
     Reload,
+    Exit,
 }
 
 fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
@@ -98,6 +101,7 @@ fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
                 KeyCode::Enter => return Ok(EditWord::Submit),
                 KeyCode::Left | KeyCode::Up => return Ok(EditWord::Prev),
                 KeyCode::Right | KeyCode::Down => return Ok(EditWord::Next),
+                KeyCode::Esc => return Ok(EditWord::Exit),
                 _ => (),
             }
             Event::Resize(..) => return Ok(EditWord::Reload),
@@ -120,7 +124,7 @@ impl WordNo {
     fn print_prompt(&self) {
         let left_arrow = if self.0 <= WordNo::MIN { " " } else { "◀︎" };
         let right_arrow = if self.0 >= WordNo::MAX { " " } else { "▶︎" };
-        print!("{} ", format!(" Word {} {} {} ", left_arrow, self.0, right_arrow).reverse());
+        print_prompt(&format!("Word {} {} {}", left_arrow, self.0, right_arrow));
     }
 
     fn increment(&mut self) {
@@ -145,53 +149,105 @@ enum MnemonicType {
     Mnemonic36,
 }
 
-fn clear_from_line_start() -> io::Result<()> {
-    let mut stdout = io::stdout();
-    stdout.queue(cursor::MoveToColumn(0))?;
-    stdout.execute(terminal::Clear(ClearType::FromCursorDown))?;
-    Ok(())
+fn print_title(text: &str) {
+    println!("{} {}", " * ".reverse(), text);
 }
 
-fn print_err(msg: &str) -> io::Result<()> {
-    let mut stdout = io::stdout();
-    stdout.queue(cursor::MoveToColumn(0))?;
-    // Saving cursor position here is wrong. If the current line is the bottommost one,
-    // then the next line printed will have the same line number as the current one.
-    // If we try to restore cursor position after printing new line, the cursor won't
-    // move a bit!
-    stdout.queue(terminal::Clear(ClearType::FromCursorDown))?;
-    // `cursor::MoveToNextLine(1)` is wrong, because the next line may not exist
-    stdout.queue(style::Print("\n"))?;
-    stdout.queue(terminal::DisableLineWrap)?;
-    stdout.queue(style::PrintStyledContent(format!(" {} ", msg).white().on_red()))?;
-    stdout.queue(terminal::EnableLineWrap)?;
-    stdout.execute(cursor::MoveToPreviousLine(1))?;
-    Ok(())
+fn print_prompt(text: &str) {
+    print!(" ({text}) ");
+}
+
+struct InputFrame {
+    title: String,
+    keymap: String,
+}
+
+impl InputFrame {
+    fn new<S: Into<String>>(title: S, keymap: &[(&str, &str)]) -> Self {
+        let keymap = keymap
+            .iter()
+            .map(
+                |(key, func)| format!(
+                    "{}{}",
+                    format!(" {key} ").on_dark_grey().white(),
+                    format!(" {func} ").on_grey().black(),
+                )
+            )
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self { title: title.into(), keymap }
+    }
+
+    fn init(&self) -> io::Result<()> {
+        print_title(&self.title);
+        Self::print_bottom(&self.keymap)
+    }
+
+    fn reload_with_error(text: &str) -> io::Result<()> {
+        Self::print_bottom(&format!(" {text} ").white().on_red().to_string())
+    }
+
+    fn reload(&self) -> io::Result<()> {
+        Self::print_bottom(&self.keymap)
+    }
+
+    fn finish(self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        stdout.queue(cursor::MoveToColumn(0))?;
+        stdout.execute(terminal::Clear(ClearType::FromCursorDown))?;
+        Ok(())
+    }
+
+    fn exit() -> ! {
+        let mut stdout = io::stdout();
+        let _ = stdout.queue(cursor::MoveToColumn(0));
+        let _ = stdout.execute(terminal::Clear(ClearType::FromCursorDown));
+        process::exit(0);
+    }
+
+    fn print_bottom(text: &str) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        stdout.queue(cursor::MoveToColumn(0))?;
+        // Saving cursor position here is wrong. If the current line is the bottommost one,
+        // then the next line printed will have the same line number as the current one.
+        // If we try to restore cursor position after printing new line, the cursor won't
+        // move a bit!
+        stdout.queue(terminal::Clear(ClearType::FromCursorDown))?;
+        // `cursor::MoveToNextLine(1)` is wrong, because the next line may not exist
+        stdout.queue(style::Print("\n"))?;
+        stdout.queue(terminal::DisableLineWrap)?;
+        stdout.queue(style::Print(text))?;
+        stdout.queue(terminal::EnableLineWrap)?;
+        stdout.execute(cursor::MoveToPreviousLine(1))?;
+        Ok(())
+    }
 }
 
 fn main() -> io::Result<()> {
-    let bullet = " * ".reverse();
     let mask = "● ";
     let (mnemonic, mnemonic_type) = {
-        println!(
-            "{bullet} Enter your mnemonic. Use {}/{} to move between words, {} to go next. Press {} to submit.",
-            "up".bold(),
-            "down".bold(),
-            "space".bold(),
-            "enter".bold(),
+        let frame = InputFrame::new(
+            "Enter your mnemonic.",
+            &[
+                ("Arrows", "Navigate"),
+                ("Space", "Next"),
+                ("Enter", "Submit"),
+                ("Esc", "Exit"),
+            ],
         );
         let mut words: [String; WordNo::MAX] = Default::default();
         let mut word_no = WordNo::new();
+        frame.init()?;
         loop {
             word_no.print_prompt();
             match edit_word(&mut words[word_no.value() - 1], mask)? {
                 EditWord::Prev => {
                     word_no.decrement();
-                    clear_from_line_start()?;
+                    frame.reload()?;
                 }
                 EditWord::Next => {
                     word_no.increment();
-                    clear_from_line_start()?;
+                    frame.reload()?;
                 }
                 EditWord::Submit => {
                     let mut mnemonic_type = Some(MnemonicType::Mnemonic36);
@@ -217,9 +273,10 @@ fn main() -> io::Result<()> {
                                 &words[..WordNo::MID].join(" ")
                             )
                             {
+                                frame.finish()?;
                                 break (mnemonic, MnemonicType::Mnemonic24);
                             } else {
-                                print_err("Invalid mnemonic.")?;
+                                InputFrame::reload_with_error("Invalid mnemonic.")?;
                             }
                         }
                         Some(MnemonicType::Mnemonic36) => {
@@ -227,54 +284,71 @@ fn main() -> io::Result<()> {
                                 &words.join(" ")
                             )
                             {
+                                frame.finish()?;
                                 break (mnemonic, MnemonicType::Mnemonic36);
                             } else {
-                                print_err("Invalid mnemonic.")?;
+                                InputFrame::reload_with_error("Invalid mnemonic.")?;
                             }
                         }
-                        None => print_err("Please fill in all the words.")?,
+                        None => InputFrame::reload_with_error("Please fill in all the words.")?,
                     }
                 }
-                EditWord::Reload => clear_from_line_start()?,
+                EditWord::Reload => frame.reload()?,
+                EditWord::Exit => InputFrame::exit(),
             }
         }
     };
-    clear_from_line_start()?;
-    println!("{bullet} Choose a password to protect your mnemonic.");
-    let words = loop {
-        let (pwd, words) = loop {
-            print!("{} ", " Password ".reverse());
-            match edit_pwd(mask)? {
-                EditPwd::Pwd(pwd) => {
-                    let result = match mnemonic_type {
-                        MnemonicType::Mnemonic24 => EncryptedMnemonic24::new(&mnemonic, pwd.as_bytes())
-                            .map(|x| x.words().to_vec()),
-                        MnemonicType::Mnemonic36 => EncryptedMnemonic36::new(&mnemonic, pwd.as_bytes())
-                            .map(|x| x.words().to_vec()),
-                    };
-                    match result {
-                        Ok(words) => break (pwd, words),
-                        Err(_) => print_err("Please choose another password.")?,
+    let words = {
+        let frame = InputFrame::new(
+            "Choose a password to protect your mnemonic.",
+            &[
+                ("Enter", "Submit"),
+                ("Esc", "Exit"),
+            ],
+        );
+        frame.init()?;
+        loop {
+            let (pwd, words) = loop {
+                print_prompt("Enter Password");
+                match edit_pwd(mask)? {
+                    EditPwd::Pwd(pwd) => {
+                        let result = match mnemonic_type {
+                            MnemonicType::Mnemonic24 => EncryptedMnemonic24::new(&mnemonic, pwd.as_bytes())
+                                .map(|x| x.words().to_vec()),
+                            MnemonicType::Mnemonic36 => EncryptedMnemonic36::new(&mnemonic, pwd.as_bytes())
+                                .map(|x| x.words().to_vec()),
+                        };
+                        match result {
+                            Ok(words) => {
+                                frame.reload()?;
+                                break (pwd, words);
+                            }
+                            Err(_) => InputFrame::reload_with_error("Please choose another password.")?,
+                        }
                     }
+                    EditPwd::Reload => frame.reload()?,
+                    EditPwd::Exit => InputFrame::exit(),
                 }
-                EditPwd::Reload => clear_from_line_start()?,
+            };
+            let repeat_pwd = loop {
+                print_prompt("Repeat Password");
+                match edit_pwd(mask)? {
+                    EditPwd::Pwd(pwd) => {
+                        frame.reload()?;
+                        break pwd;
+                    }
+                    EditPwd::Reload => frame.reload()?,
+                    EditPwd::Exit => InputFrame::exit(),
+                }
+            };
+            if pwd == repeat_pwd {
+                frame.finish()?;
+                break words;
             }
-        };
-        clear_from_line_start()?;
-        let repeat_pwd = loop {
-            print!("{} ", " Repeat Password ".reverse());
-            match edit_pwd(mask)? {
-                EditPwd::Pwd(pwd) => break pwd,
-                EditPwd::Reload => clear_from_line_start()?,
-            }
-        };
-        if pwd == repeat_pwd {
-            break words;
+            InputFrame::reload_with_error("Password does not match.")?;
         }
-        print_err("Password does not match.")?;
     };
-    clear_from_line_start()?;
-    println!("{bullet} An encrypted version of your mnemonic has been successfully created:");
+    print_title("An encrypted version of your mnemonic has been successfully created:");
     println!("{}", words.join(" "));
     Ok(())
 }
