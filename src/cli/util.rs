@@ -15,7 +15,7 @@ impl<F: FnMut()> Drop for Defer<F> {
 #[macro_export]
 macro_rules! defer {
     ($target:expr) => {
-        let _defer = $crate::util::Defer::new(|| {
+        let _defer = $crate::cli::util::Defer::new(|| {
             let _ = $target;
         });
     };
