@@ -171,8 +171,12 @@ fn print_title(text: &str) {
     println!("{} {}", " * ".reverse(), text);
 }
 
-fn print_prompt(text: &str) {
-    print!("    {text}: ");
+fn print_prompt(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    stdout.queue(terminal::DisableLineWrap)?;
+    stdout.queue(style::Print(format!("    {text}: ")))?;
+    stdout.execute(terminal::EnableLineWrap)?;
+    Ok(())
 }
 
 struct InputFrame {
@@ -261,7 +265,7 @@ fn main() -> io::Result<()> {
         );
         frame.init()?;
         loop {
-            print_prompt(&format!("Word {:#04x}", word_no.value()));
+            print_prompt(&format!("Word {:#04x}", word_no.value()))?;
             match edit_word(&mut words[word_no.value() - 1], mask)? {
                 EditWord::Prev => {
                     word_no.decrement();
@@ -335,7 +339,7 @@ fn main() -> io::Result<()> {
         loop {
             let mut pwd = String::new();
             let words = loop {
-                print_prompt("Enter Password");
+                print_prompt("Enter Password")?;
                 match edit_pwd(&mut pwd, mask)? {
                     EditPwd::Submit => {
                         let result = match mnemonic_type {
@@ -358,7 +362,7 @@ fn main() -> io::Result<()> {
             };
             let mut repeat_pwd = String::new();
             loop {
-                print_prompt("Repeat Password");
+                print_prompt("Repeat Password")?;
                 match edit_pwd(&mut repeat_pwd, mask)? {
                     EditPwd::Submit => {
                         frame.reload()?;
@@ -377,7 +381,10 @@ fn main() -> io::Result<()> {
     };
     {
         let frame = InputFrame::new(
-            "Encryption successful. View your encrypted mnemonic below.",
+            format!(
+                "Encryption successful. View your encrypted mnemonic ({} words) below.",
+                words.len(),
+            ),
             &[
                 ("Arrows", "Navigate"),
                 ("Enter", "Done"),
@@ -391,7 +398,7 @@ fn main() -> io::Result<()> {
         );
         frame.init()?;
         loop {
-            print_prompt(&format!("Word {:#04x}", word_no.value()));
+            print_prompt(&format!("Word {:#04x}", word_no.value()))?;
             match view_word(words[word_no.value() - 1])? {
                 ViewWord::Prev => {
                     word_no.decrement();
