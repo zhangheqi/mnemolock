@@ -7,4 +7,5 @@ edition = "2024"
 aes-gcm-siv = "0.11"
 argon2 = "0.5"
 bip39 = "2.2"
+clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"

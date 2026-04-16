@@ -1,11 +1,16 @@
+pub mod decrypt;
 pub mod encrypt;
 pub mod util;
 
 use std::{io, process};
 use crossterm::{ExecutableCommand, cursor};
+use crossterm::event::{self, Event, KeyCode};
 use crossterm::style::{self, Stylize};
 use crossterm::terminal::{self, ClearType};
 use crossterm::QueueableCommand;
+use crate::defer;
+
+pub const INPUT_MASK: &str = "● ";
 
 pub enum MnemonicType {
     Mnemonic12,
@@ -17,6 +22,13 @@ impl MnemonicType {
         match self {
             MnemonicType::Mnemonic12 => 12,
             MnemonicType::Mnemonic24 => 24,
+        }
+    }
+
+    const fn encrypted_word_count(&self) -> usize {
+        match self {
+            MnemonicType::Mnemonic12 => 24,
+            MnemonicType::Mnemonic24 => 36,
         }
     }
 }
@@ -92,5 +104,146 @@ impl InputFrame {
         stdout.queue(terminal::EnableLineWrap)?;
         stdout.execute(cursor::MoveToPreviousLine(1))?;
         Ok(())
+    }
+}
+
+pub enum ViewWord {
+    Prev,
+    Next,
+    Done,
+    Reload,
+    Exit,
+}
+
+pub fn view_word(word: &str) -> io::Result<ViewWord> {
+    let mut stdout = io::stdout();
+
+    terminal::enable_raw_mode()?;
+    defer!(terminal::disable_raw_mode());
+
+    stdout.execute(terminal::DisableLineWrap)?;
+    defer!(io::stdout().execute(terminal::EnableLineWrap));
+
+    stdout.execute(cursor::Hide)?;
+    defer!(io::stdout().execute(cursor::Show));
+
+    stdout.execute(style::Print(word))?;
+
+    loop {
+        match event::read()? {
+            Event::Key(event) => match event.code {
+                KeyCode::Enter => return Ok(ViewWord::Done),
+                KeyCode::Left | KeyCode::Up => return Ok(ViewWord::Prev),
+                KeyCode::Right | KeyCode::Down => return Ok(ViewWord::Next),
+                KeyCode::Esc => return Ok(ViewWord::Exit),
+                _ => (),
+            }
+            Event::Resize(..) => return Ok(ViewWord::Reload),
+            _ => (),
+        }
+    }
+}
+
+pub enum EditPwd {
+    Submit,
+    Reload,
+    Exit,
+}
+
+pub fn edit_pwd(buf: &mut String, mask: &str) -> io::Result<EditPwd> {
+    let mut stdout = io::stdout();
+
+    terminal::enable_raw_mode()?;
+    defer!(terminal::disable_raw_mode());
+
+    stdout.execute(terminal::DisableLineWrap)?;
+    defer!(io::stdout().execute(terminal::EnableLineWrap));
+
+    let mut cursor_checkpoints = Vec::new();
+
+    for _ in 0..buf.chars().count() {
+        cursor_checkpoints.push(cursor::position()?);
+        stdout.execute(style::Print(mask))?;
+    }
+
+    loop {
+        match event::read()? {
+            Event::Key(event) => match event.code {
+                KeyCode::Char(ch) => {
+                    buf.push(ch);
+                    cursor_checkpoints.push(cursor::position()?);
+                    stdout.execute(style::Print(mask))?;
+                }
+                KeyCode::Backspace => {
+                    let Some(pos) = cursor_checkpoints.pop() else {
+                        continue;
+                    };
+                    buf.pop();
+                    stdout.queue(cursor::MoveTo(pos.0, pos.1))?;
+                    stdout.execute(terminal::Clear(ClearType::UntilNewLine))?;
+                }
+                KeyCode::Enter => return Ok(EditPwd::Submit),
+                KeyCode::Esc => return Ok(EditPwd::Exit),
+                _ => (),
+            }
+            Event::Resize(..) => return Ok(EditPwd::Reload),
+            _ => (),
+        }
+    }
+
+}
+
+pub enum EditWord {
+    Prev,
+    Next,
+    Submit,
+    Reload,
+    Exit,
+}
+
+pub fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
+    let mut stdout = io::stdout();
+
+    terminal::enable_raw_mode()?;
+    defer!(terminal::disable_raw_mode());
+
+    stdout.execute(terminal::DisableLineWrap)?;
+    defer!(io::stdout().execute(terminal::EnableLineWrap));
+
+    let mut cursor_checkpoints = Vec::new();
+
+    for _ in 0..buf.chars().count() {
+        cursor_checkpoints.push(cursor::position()?);
+        stdout.execute(style::Print(mask))?;
+    }
+
+    loop {
+        match event::read()? {
+            Event::Key(event) => match event.code {
+                KeyCode::Char(ch) => {
+                    if ch == ' ' {
+                        return Ok(EditWord::Next);
+                    }
+                    buf.push(ch);
+                    cursor_checkpoints.push(cursor::position()?);
+                    stdout.execute(style::Print(mask))?;
+                }
+                KeyCode::Backspace => {
+                    let Some(pos) = cursor_checkpoints.pop() else {
+                        return Ok(EditWord::Prev);
+                    };
+                    buf.pop();
+                    stdout.queue(cursor::MoveTo(pos.0, pos.1))?;
+                    stdout.execute(terminal::Clear(ClearType::UntilNewLine))?;
+                }
+                KeyCode::Enter => return Ok(EditWord::Submit),
+                KeyCode::Left | KeyCode::Up => return Ok(EditWord::Prev),
+                KeyCode::Right | KeyCode::Down => return Ok(EditWord::Next),
+                KeyCode::Esc => return Ok(EditWord::Exit),
+                _ => (),
+            }
+            Event::Resize(..) => return Ok(EditWord::Reload),
+            _ => (),
+        }
     }
 }

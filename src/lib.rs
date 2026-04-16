@@ -27,14 +27,28 @@ mod sealed {
     impl Sealed for [u8; 48] {}
 }
 
-pub type EncryptedMnemonic24 = EncryptedMnemonic<[u8; 32]>;
-pub type EncryptedMnemonic36 = EncryptedMnemonic<[u8; 48]>;
+pub enum EncryptedMnemonic {
+    EncryptedMnemonic24(EncryptedMnemonic24),
+    EncryptedMnemonic36(EncryptedMnemonic36),
+}
 
-pub struct EncryptedMnemonic<E: Entropy> {
+impl EncryptedMnemonic {
+    pub fn decrypt(&self, pwd: &[u8]) -> Result<Mnemonic> {
+        match self {
+            EncryptedMnemonic::EncryptedMnemonic24(mnemonic) => mnemonic.decrypt(pwd),
+            EncryptedMnemonic::EncryptedMnemonic36(mnemonic) => mnemonic.decrypt(pwd),
+        }
+    }
+}
+
+pub type EncryptedMnemonic24 = _EncryptedMnemonic<[u8; 32]>;
+pub type EncryptedMnemonic36 = _EncryptedMnemonic<[u8; 48]>;
+
+pub struct _EncryptedMnemonic<E: Entropy> {
     entropy: E,
 }
 
-impl<E: Entropy> EncryptedMnemonic<E> {
+impl<E: Entropy> _EncryptedMnemonic<E> {
     pub fn new(mnemonic: &Mnemonic, pwd: &[u8]) -> Result<Self> {
         let mut key = [0u8; 32];
         Argon2::default().hash_password_into(pwd, SALT, &mut key)?;
@@ -79,6 +93,10 @@ impl EncryptedMnemonic24 {
         }
         words
     }
+
+    pub fn into_enum(self) -> EncryptedMnemonic {
+        EncryptedMnemonic::EncryptedMnemonic24(self)
+    }
 }
 
 impl EncryptedMnemonic36 {
@@ -104,5 +122,9 @@ impl EncryptedMnemonic36 {
             words[i] = word;
         }
         words
+    }
+
+    pub fn into_enum(self) -> EncryptedMnemonic {
+        EncryptedMnemonic::EncryptedMnemonic36(self)
     }
 }
