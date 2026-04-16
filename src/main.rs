@@ -10,6 +10,45 @@ use crossterm::terminal::{self, ClearType};
 use crossterm::QueueableCommand;
 use mnemolock::{EncryptedMnemonic24, EncryptedMnemonic36};
 
+use crate::util::BoundedIndex;
+
+enum ViewWord {
+    Prev,
+    Next,
+    Done,
+    Reload,
+    Exit,
+}
+
+fn view_word(word: &str) -> io::Result<ViewWord> {
+    let mut stdout = io::stdout();
+
+    terminal::enable_raw_mode()?;
+    defer!(terminal::disable_raw_mode());
+
+    stdout.execute(terminal::DisableLineWrap)?;
+    defer!(io::stdout().execute(terminal::EnableLineWrap));
+
+    stdout.execute(cursor::Hide)?;
+    defer!(io::stdout().execute(cursor::Show));
+
+    stdout.execute(style::Print(word))?;
+
+    loop {
+        match event::read()? {
+            Event::Key(event) => match event.code {
+                KeyCode::Enter => return Ok(ViewWord::Done),
+                KeyCode::Left | KeyCode::Up => return Ok(ViewWord::Prev),
+                KeyCode::Right | KeyCode::Down => return Ok(ViewWord::Next),
+                KeyCode::Esc => return Ok(ViewWord::Exit),
+                _ => (),
+            }
+            Event::Resize(..) => return Ok(ViewWord::Reload),
+            _ => (),
+        }
+    }
+}
+
 enum EditPwd {
     Submit,
     Reload,
@@ -114,41 +153,18 @@ fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
     }
 }
 
-struct WordNo(usize);
-
-impl WordNo {
-    const MIN: usize = 1;
-    const MID: usize = 12;
-    const MAX: usize = 24;
-
-    fn new() -> Self {
-        Self(Self::MIN)
-    }
-
-    fn print_prompt(&self) {
-        print_prompt(&format!("Word {:#04x}", self.0));
-    }
-
-    fn increment(&mut self) {
-        if self.0 < Self::MAX {
-            self.0 += 1;
-        }
-    }
-
-    fn decrement(&mut self) {
-        if self.0 > Self::MIN {
-            self.0 -= 1;
-        }
-    }
-
-    fn value(&self) -> usize {
-        self.0
-    }
+enum MnemonicType {
+    Mnemonic12,
+    Mnemonic24,
 }
 
-enum MnemonicType {
-    Mnemonic24,
-    Mnemonic36,
+impl MnemonicType {
+    const fn word_count(&self) -> usize {
+        match self {
+            MnemonicType::Mnemonic12 => 12,
+            MnemonicType::Mnemonic24 => 24,
+        }
+    }
 }
 
 fn print_title(text: &str) {
@@ -237,11 +253,15 @@ fn main() -> io::Result<()> {
                 ("Esc", "Exit"),
             ],
         );
-        let mut words: [String; WordNo::MAX] = Default::default();
-        let mut word_no = WordNo::new();
+        let mut words: [String; MnemonicType::Mnemonic24.word_count()] = Default::default();
+        let mut word_no = BoundedIndex::new(
+            1,
+            1,
+            MnemonicType::Mnemonic24.word_count(),
+        );
         frame.init()?;
         loop {
-            word_no.print_prompt();
+            print_prompt(&format!("Word {:#04x}", word_no.value()));
             match edit_word(&mut words[word_no.value() - 1], mask)? {
                 EditWord::Prev => {
                     word_no.decrement();
@@ -252,14 +272,17 @@ fn main() -> io::Result<()> {
                     frame.reload()?;
                 }
                 EditWord::Submit => {
-                    let mut mnemonic_type = Some(MnemonicType::Mnemonic36);
-                    for i in 0..WordNo::MAX {
+                    let mut mnemonic_type = Some(MnemonicType::Mnemonic24);
+                    for i in 0..MnemonicType::Mnemonic24.word_count() {
                         if words[i].is_empty() {
-                            match i.cmp(&WordNo::MID) {
+                            match i.cmp(&MnemonicType::Mnemonic12.word_count()) {
                                 Ordering::Less => mnemonic_type = None,
                                 Ordering::Equal => {
-                                    if words[WordNo::MID + 1..WordNo::MAX].iter().all(String::is_empty) {
-                                        mnemonic_type = Some(MnemonicType::Mnemonic24);
+                                    if words[MnemonicType::Mnemonic12.word_count() + 1..MnemonicType::Mnemonic24.word_count()]
+                                        .iter()
+                                        .all(String::is_empty)
+                                    {
+                                        mnemonic_type = Some(MnemonicType::Mnemonic12);
                                     } else {
                                         mnemonic_type = None;
                                     }
@@ -270,24 +293,24 @@ fn main() -> io::Result<()> {
                         }
                     }
                     match mnemonic_type {
-                        Some(MnemonicType::Mnemonic24) => {
+                        Some(MnemonicType::Mnemonic12) => {
                             if let Ok(mnemonic) = Mnemonic::parse_normalized(
-                                &words[..WordNo::MID].join(" ")
+                                &words[..MnemonicType::Mnemonic12.word_count()].join(" ")
                             )
                             {
                                 frame.finish()?;
-                                break (mnemonic, MnemonicType::Mnemonic24);
+                                break (mnemonic, MnemonicType::Mnemonic12);
                             } else {
                                 InputFrame::reload_with_error("Invalid mnemonic.")?;
                             }
                         }
-                        Some(MnemonicType::Mnemonic36) => {
+                        Some(MnemonicType::Mnemonic24) => {
                             if let Ok(mnemonic) = Mnemonic::parse_normalized(
                                 &words.join(" ")
                             )
                             {
                                 frame.finish()?;
-                                break (mnemonic, MnemonicType::Mnemonic36);
+                                break (mnemonic, MnemonicType::Mnemonic24);
                             } else {
                                 InputFrame::reload_with_error("Invalid mnemonic.")?;
                             }
@@ -316,9 +339,9 @@ fn main() -> io::Result<()> {
                 match edit_pwd(&mut pwd, mask)? {
                     EditPwd::Submit => {
                         let result = match mnemonic_type {
-                            MnemonicType::Mnemonic24 => EncryptedMnemonic24::new(&mnemonic, pwd.as_bytes())
+                            MnemonicType::Mnemonic12 => EncryptedMnemonic24::new(&mnemonic, pwd.as_bytes())
                                 .map(|x| x.words().to_vec()),
-                            MnemonicType::Mnemonic36 => EncryptedMnemonic36::new(&mnemonic, pwd.as_bytes())
+                            MnemonicType::Mnemonic24 => EncryptedMnemonic36::new(&mnemonic, pwd.as_bytes())
                                 .map(|x| x.words().to_vec()),
                         };
                         match result {
@@ -352,7 +375,40 @@ fn main() -> io::Result<()> {
             InputFrame::reload_with_error("Password does not match.")?;
         }
     };
-    print_title("An encrypted version of your mnemonic has been successfully created:");
-    println!("{}", words.join(" "));
+    {
+        let frame = InputFrame::new(
+            "Encryption successful. View your encrypted mnemonic below.",
+            &[
+                ("Arrows", "Navigate"),
+                ("Enter", "Done"),
+                ("Esc", "Exit"),
+            ],
+        );
+        let mut word_no = BoundedIndex::new(
+            1,
+            1,
+            words.len(),
+        );
+        frame.init()?;
+        loop {
+            print_prompt(&format!("Word {:#04x}", word_no.value()));
+            match view_word(words[word_no.value() - 1])? {
+                ViewWord::Prev => {
+                    word_no.decrement();
+                    frame.reload()?;
+                }
+                ViewWord::Next => {
+                    word_no.increment();
+                    frame.reload()?;
+                }
+                ViewWord::Done => {
+                    frame.finish()?;
+                    break;
+                }
+                ViewWord::Reload => frame.reload()?,
+                ViewWord::Exit => InputFrame::exit(),
+            }
+        }
+    }
     Ok(())
 }
