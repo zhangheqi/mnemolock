@@ -4,10 +4,11 @@ pub mod util;
 
 use std::{io, process};
 use crossterm::{ExecutableCommand, cursor};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{self, Stylize};
 use crossterm::terminal::{self, ClearType};
 use crossterm::QueueableCommand;
+use mnemolock::error::Error;
 use crate::defer;
 
 pub const INPUT_MASK: &str = "● ";
@@ -30,6 +31,25 @@ impl MnemonicType {
             MnemonicType::Mnemonic12 => 24,
             MnemonicType::Mnemonic24 => 36,
         }
+    }
+}
+
+/// Joins mnemonic words for parsing. BIP39 words only match in lowercase, and the input is masked,
+/// so someone typing with Caps Lock on couldn't see what's wrong.
+pub fn join_words(words: &[String]) -> String {
+    words.iter().map(|word| word.to_lowercase()).collect::<Vec<_>>().join(" ")
+}
+
+/// Explains why a mnemonic was rejected. The words are masked, so point at the wrong one if we can.
+pub fn invalid_mnemonic_text(error: Error) -> String {
+    match error {
+        Error::Bip39Error(bip39::Error::UnknownWord(i)) => {
+            format!("Word {} is not a valid BIP39 word.", i + 1)
+        }
+        Error::Bip39Error(bip39::Error::InvalidChecksum) => {
+            "Checksum mismatch. Check the words and their order.".to_string()
+        }
+        _ => "Invalid mnemonic.".to_string(),
     }
 }
 
@@ -107,6 +127,31 @@ impl InputFrame {
     }
 }
 
+/// Reads the next event, skipping key releases. Windows reports both the press and the release of
+/// every key, which would otherwise be handled as two keystrokes.
+fn read_event() -> io::Result<Event> {
+    loop {
+        match event::read()? {
+            Event::Key(event) if event.is_release() => (),
+            event => return Ok(event),
+        }
+    }
+}
+
+/// Raw mode turns off the terminal's signal keys, so Ctrl+C arrives as a key event instead of
+/// interrupting the program.
+fn is_ctrl_c(event: &KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Char('c' | 'C'))
+        && event.modifiers.contains(KeyModifiers::CONTROL)
+        && !event.modifiers.contains(KeyModifiers::ALT)
+}
+
+/// Whether a character key types text. Ctrl+key and Alt+key are shortcuts, not text, but Windows
+/// reports AltGr as Ctrl+Alt, and AltGr types characters such as `@` on many keyboard layouts.
+fn is_text(event: &KeyEvent) -> bool {
+    event.modifiers.contains(KeyModifiers::CONTROL) == event.modifiers.contains(KeyModifiers::ALT)
+}
+
 pub enum ViewWord {
     Prev,
     Next,
@@ -130,7 +175,8 @@ pub fn view_word(word: &str) -> io::Result<ViewWord> {
     stdout.execute(style::Print(word))?;
 
     loop {
-        match event::read()? {
+        match read_event()? {
+            Event::Key(event) if is_ctrl_c(&event) => return Ok(ViewWord::Exit),
             Event::Key(event) => match event.code {
                 KeyCode::Enter => return Ok(ViewWord::Done),
                 KeyCode::Left | KeyCode::Up => return Ok(ViewWord::Prev),
@@ -167,9 +213,10 @@ pub fn edit_pwd(buf: &mut String, mask: &str) -> io::Result<EditPwd> {
     }
 
     loop {
-        match event::read()? {
+        match read_event()? {
+            Event::Key(event) if is_ctrl_c(&event) => return Ok(EditPwd::Exit),
             Event::Key(event) => match event.code {
-                KeyCode::Char(ch) => {
+                KeyCode::Char(ch) if is_text(&event) => {
                     buf.push(ch);
                     cursor_checkpoints.push(cursor::position()?);
                     stdout.execute(style::Print(mask))?;
@@ -218,9 +265,10 @@ pub fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
     }
 
     loop {
-        match event::read()? {
+        match read_event()? {
+            Event::Key(event) if is_ctrl_c(&event) => return Ok(EditWord::Exit),
             Event::Key(event) => match event.code {
-                KeyCode::Char(ch) => {
+                KeyCode::Char(ch) if is_text(&event) => {
                     if ch == ' ' {
                         return Ok(EditWord::Next);
                     }
@@ -245,5 +293,51 @@ pub fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
             Event::Resize(..) => return Ok(EditWord::Reload),
             _ => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn ctrl_c_is_detected() {
+        assert!(is_ctrl_c(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(is_ctrl_c(&key(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+        assert!(!is_ctrl_c(&key(KeyCode::Char('c'), KeyModifiers::NONE)));
+        assert!(!is_ctrl_c(&key(KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::ALT)));
+    }
+
+    #[test]
+    fn modified_keys_are_not_text_except_altgr() {
+        assert!(is_text(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(is_text(&key(KeyCode::Char('A'), KeyModifiers::SHIFT)));
+        assert!(!is_text(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
+        assert!(!is_text(&key(KeyCode::Char('x'), KeyModifiers::ALT)));
+        // AltGr on Windows
+        assert!(is_text(&key(KeyCode::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT)));
+    }
+
+    #[test]
+    fn words_are_lowercased_and_joined() {
+        let words = ["Abandon", "ABOUT", "zoo"].map(String::from);
+        assert_eq!(join_words(&words), "abandon about zoo");
+    }
+
+    #[test]
+    fn invalid_mnemonic_text_points_at_the_problem() {
+        assert_eq!(
+            invalid_mnemonic_text(Error::Bip39Error(bip39::Error::UnknownWord(6))),
+            "Word 7 is not a valid BIP39 word.",
+        );
+        assert_eq!(
+            invalid_mnemonic_text(Error::Bip39Error(bip39::Error::InvalidChecksum)),
+            "Checksum mismatch. Check the words and their order.",
+        );
+        assert_eq!(invalid_mnemonic_text(Error::BadWordCount), "Invalid mnemonic.");
     }
 }

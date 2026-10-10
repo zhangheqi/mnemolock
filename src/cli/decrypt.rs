@@ -56,25 +56,27 @@ pub fn decrypt() -> io::Result<()> {
                     }
                     match mnemonic_type {
                         Some(MnemonicType::Mnemonic12) => {
-                            if let Ok(mnemonic) = EncryptedMnemonic24::from_words(
-                                &words[..MnemonicType::Mnemonic12.encrypted_word_count()].join(" ")
-                            )
-                            {
-                                frame.finish()?;
-                                break mnemonic.into_enum();
-                            } else {
-                                InputFrame::reload_with_error("Invalid mnemonic.")?;
+                            match EncryptedMnemonic24::from_words(
+                                &cli::join_words(&words[..MnemonicType::Mnemonic12.encrypted_word_count()])
+                            ) {
+                                Ok(mnemonic) => {
+                                    frame.finish()?;
+                                    break mnemonic.into_enum();
+                                }
+                                Err(error) => InputFrame::reload_with_error(
+                                    &cli::invalid_mnemonic_text(error)
+                                )?,
                             }
                         }
                         Some(MnemonicType::Mnemonic24) => {
-                            if let Ok(mnemonic) = EncryptedMnemonic36::from_words(
-                                &words.join(" ")
-                            )
-                            {
-                                frame.finish()?;
-                                break mnemonic.into_enum();
-                            } else {
-                                InputFrame::reload_with_error("Invalid mnemonic.")?;
+                            match EncryptedMnemonic36::from_words(&cli::join_words(&words)) {
+                                Ok(mnemonic) => {
+                                    frame.finish()?;
+                                    break mnemonic.into_enum();
+                                }
+                                Err(error) => InputFrame::reload_with_error(
+                                    &cli::invalid_mnemonic_text(error)
+                                )?,
                             }
                         }
                         None => InputFrame::reload_with_error("Please fill in all the words.")?,
