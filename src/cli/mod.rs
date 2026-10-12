@@ -3,6 +3,7 @@ pub mod encrypt;
 pub mod util;
 
 use std::{io, process};
+use std::sync::Mutex;
 use crossterm::{ExecutableCommand, cursor};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{self, Stylize};
@@ -127,12 +128,55 @@ impl InputFrame {
     }
 }
 
-/// Reads the next event, skipping key releases. Windows reports both the press and the release of
-/// every key, which would otherwise be handled as two keystrokes.
+/// Character keys that are pressed but not yet released, to tell duplicate key releases apart from
+/// releases that carry text.
+struct HeldKeys {
+    count: usize,
+    last_press: Option<KeyCode>,
+}
+
+impl HeldKeys {
+    const fn new() -> Self {
+        Self { count: 0, last_press: None }
+    }
+
+    /// Returns the key event to handle, if any. Windows reports both the press and the release of
+    /// every key, so releases are dropped, except a character release with no press before it:
+    /// that's how Windows delivers Alt codes, such as Alt+0163 for `£`. The released character can
+    /// differ from the pressed one if Shift changed in between, so presses are counted, not matched.
+    fn filter(&mut self, event: KeyEvent) -> Option<KeyEvent> {
+        let KeyCode::Char(_) = event.code else {
+            return (!event.is_release()).then_some(event);
+        };
+        if event.is_release() {
+            self.last_press = None;
+            if self.count > 0 {
+                self.count -= 1;
+                return None;
+            }
+            // Only text arrives this way, so the modifiers held at the time aren't a shortcut
+            return Some(KeyEvent::new(event.code, KeyModifiers::NONE));
+        }
+        // A held key repeats by being pressed again without a release in between
+        if self.last_press != Some(event.code) {
+            self.count += 1;
+        }
+        self.last_press = Some(event.code);
+        Some(event)
+    }
+}
+
+static HELD_KEYS: Mutex<HeldKeys> = Mutex::new(HeldKeys::new());
+
+/// Reads the next event, skipping duplicate key releases (see `HeldKeys::filter`).
 fn read_event() -> io::Result<Event> {
     loop {
         match event::read()? {
-            Event::Key(event) if event.is_release() => (),
+            Event::Key(event) => {
+                if let Some(event) = HELD_KEYS.lock().unwrap().filter(event) {
+                    return Ok(Event::Key(event));
+                }
+            }
             event => return Ok(event),
         }
     }
@@ -299,9 +343,61 @@ pub fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEventKind;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    fn press(ch: char) -> KeyEvent {
+        key(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    fn release(code: KeyCode) -> KeyEvent {
+        KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Release)
+    }
+
+    #[test]
+    fn key_releases_are_dropped() {
+        let mut held = HeldKeys::new();
+        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(held.filter(press('a')), Some(press('a')));
+        assert_eq!(held.filter(release(KeyCode::Char('a'))), None);
+        assert_eq!(held.filter(enter), Some(enter));
+        assert_eq!(held.filter(release(KeyCode::Enter)), None);
+        // Rollover: the next key is pressed before the previous one is released
+        assert_eq!(held.filter(press('a')), Some(press('a')));
+        assert_eq!(held.filter(press('b')), Some(press('b')));
+        assert_eq!(held.filter(release(KeyCode::Char('a'))), None);
+        assert_eq!(held.filter(release(KeyCode::Char('b'))), None);
+        // Shift pressed before the key is released changes the released character
+        assert_eq!(held.filter(press('1')), Some(press('1')));
+        assert_eq!(held.filter(release(KeyCode::Char('!'))), None);
+        assert_eq!(held.count, 0);
+    }
+
+    #[test]
+    fn held_key_repeats_are_typed_but_released_once() {
+        let mut held = HeldKeys::new();
+        for _ in 0..3 {
+            assert_eq!(held.filter(press('a')), Some(press('a')));
+        }
+        assert_eq!(held.filter(release(KeyCode::Char('a'))), None);
+        assert_eq!(held.count, 0);
+    }
+
+    #[test]
+    fn release_without_press_is_typed() {
+        // An Alt code, possibly with Alt still reported as held
+        let mut held = HeldKeys::new();
+        let alt_code = KeyEvent::new_with_kind(KeyCode::Char('£'), KeyModifiers::ALT, KeyEventKind::Release);
+        let event = held.filter(alt_code).unwrap();
+        assert_eq!(event, press('£'));
+        assert!(is_text(&event));
+        // After ordinary typing too
+        assert_eq!(held.filter(press('a')), Some(press('a')));
+        assert_eq!(held.filter(release(KeyCode::Char('a'))), None);
+        assert_eq!(held.filter(release(KeyCode::Char('£'))), Some(press('£')));
     }
 
     #[test]
