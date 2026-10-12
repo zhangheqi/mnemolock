@@ -440,6 +440,7 @@ dependencies = [
  "bip39",
  "clap",
  "crossterm",
+ "crossterm_winapi",
 ]
 
 [[package]]
