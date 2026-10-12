@@ -5,6 +5,10 @@ use mnemolock::{EncryptedMnemonic24, EncryptedMnemonic36};
 use crate::cli::util::BoundedIndex;
 use crate::cli::{self, EditPwd, EditWord, INPUT_MASK, InputFrame, MnemonicType, ViewWord};
 
+/// Passwords shorter than this get a warning, since a weak password is all that protects the
+/// encrypted mnemonic from anyone who finds it.
+const MIN_RECOMMENDED_PWD_LEN: usize = 8;
+
 pub fn encrypt() -> io::Result<()> {
     let (mnemonic, mnemonic_type) = {
         let frame = InputFrame::new(
@@ -57,25 +61,27 @@ pub fn encrypt() -> io::Result<()> {
                     }
                     match mnemonic_type {
                         Some(MnemonicType::Mnemonic12) => {
-                            if let Ok(mnemonic) = Mnemonic::parse_normalized(
-                                &words[..MnemonicType::Mnemonic12.word_count()].join(" ")
-                            )
-                            {
-                                frame.finish()?;
-                                break (mnemonic, MnemonicType::Mnemonic12);
-                            } else {
-                                InputFrame::reload_with_error("Invalid mnemonic.")?;
+                            match Mnemonic::parse_normalized(
+                                &cli::join_words(&words[..MnemonicType::Mnemonic12.word_count()])
+                            ) {
+                                Ok(mnemonic) => {
+                                    frame.finish()?;
+                                    break (mnemonic, MnemonicType::Mnemonic12);
+                                }
+                                Err(error) => InputFrame::reload_with_error(
+                                    &cli::invalid_mnemonic_text(error.into())
+                                )?,
                             }
                         }
                         Some(MnemonicType::Mnemonic24) => {
-                            if let Ok(mnemonic) = Mnemonic::parse_normalized(
-                                &words.join(" ")
-                            )
-                            {
-                                frame.finish()?;
-                                break (mnemonic, MnemonicType::Mnemonic24);
-                            } else {
-                                InputFrame::reload_with_error("Invalid mnemonic.")?;
+                            match Mnemonic::parse_normalized(&cli::join_words(&words)) {
+                                Ok(mnemonic) => {
+                                    frame.finish()?;
+                                    break (mnemonic, MnemonicType::Mnemonic24);
+                                }
+                                Err(error) => InputFrame::reload_with_error(
+                                    &cli::invalid_mnemonic_text(error.into())
+                                )?,
                             }
                         }
                         None => InputFrame::reload_with_error("Please fill in all the words.")?,
@@ -100,6 +106,9 @@ pub fn encrypt() -> io::Result<()> {
             let words = loop {
                 cli::print_prompt("Enter Password")?;
                 match cli::edit_pwd(&mut pwd, INPUT_MASK)? {
+                    EditPwd::Submit if pwd.is_empty() => {
+                        InputFrame::reload_with_error("Password cannot be empty.")?
+                    }
                     EditPwd::Submit => {
                         let result = match mnemonic_type {
                             MnemonicType::Mnemonic12 => EncryptedMnemonic24::new(&mnemonic, pwd.as_bytes())
@@ -109,7 +118,13 @@ pub fn encrypt() -> io::Result<()> {
                         };
                         match result {
                             Ok(words) => {
-                                frame.reload()?;
+                                if pwd.chars().count() < MIN_RECOMMENDED_PWD_LEN {
+                                    InputFrame::reload_with_error(
+                                        "Warning: short passwords are easy to guess.",
+                                    )?;
+                                } else {
+                                    frame.reload()?;
+                                }
                                 break words;
                             }
                             Err(_) => InputFrame::reload_with_error("Please choose another password.")?,
