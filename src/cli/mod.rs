@@ -1,16 +1,20 @@
 pub mod decrypt;
 pub mod encrypt;
 pub mod util;
+#[cfg(unix)]
+mod unix;
 #[cfg(any(windows, test))]
 mod windows;
 
-use std::{io, process};
+use std::io;
 use crossterm::{ExecutableCommand, cursor};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{self, Stylize};
 use crossterm::terminal::{self, ClearType};
 use crossterm::QueueableCommand;
 use mnemolock::error::Error;
+use zeroize::Zeroizing;
+use crate::cli::util::SecretString;
 use crate::defer;
 
 pub const INPUT_MASK: &str = "● ";
@@ -38,8 +42,21 @@ impl MnemonicType {
 
 /// Joins mnemonic words for parsing. BIP39 words only match in lowercase, and the input is masked,
 /// so someone typing with Caps Lock on couldn't see what's wrong.
-pub fn join_words(words: &[String]) -> String {
-    words.iter().map(|word| word.to_lowercase()).collect::<Vec<_>>().join(" ")
+pub fn join_words(words: &[SecretString]) -> Zeroizing<String> {
+    fn lowercase(word: &str) -> impl Iterator<Item = char> {
+        word.chars().flat_map(char::to_lowercase)
+    }
+    // Make room for everything first. A string that grows as it's built moves, and leaves copies
+    // of the words behind in freed memory.
+    let len = words.iter().map(|word| lowercase(word).map(char::len_utf8).sum::<usize>() + 1).sum();
+    let mut joined = Zeroizing::new(String::with_capacity(len));
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            joined.push(' ');
+        }
+        joined.extend(lowercase(word));
+    }
+    joined
 }
 
 /// Explains why a mnemonic was rejected. The words are masked, so point at the wrong one if we can.
@@ -85,7 +102,8 @@ impl InputFrame {
     }
 
     pub fn init(&self) -> io::Result<()> {
-        println!("{} {}", " * ".reverse(), self.title);
+        // In raw mode a newline moves down a line, but not back to the first column
+        io::stdout().queue(style::Print(format!("{} {}\r\n", " * ".reverse(), self.title)))?;
         Self::print_bottom(&self.keymap)
     }
 
@@ -102,13 +120,6 @@ impl InputFrame {
         stdout.queue(cursor::MoveToColumn(0))?;
         stdout.execute(terminal::Clear(ClearType::FromCursorDown))?;
         Ok(())
-    }
-
-    pub fn exit() -> ! {
-        let mut stdout = io::stdout();
-        let _ = stdout.queue(cursor::MoveToColumn(0));
-        let _ = stdout.execute(terminal::Clear(ClearType::FromCursorDown));
-        process::exit(0);
     }
 
     pub fn print_bottom(text: &str) -> io::Result<()> {
@@ -129,13 +140,55 @@ impl InputFrame {
     }
 }
 
+/// Runs the program's prompts with the terminal in raw mode from start to finish.
+///
+/// Outside raw mode the terminal echoes whatever is typed. Leaving it between prompts, or while a
+/// key is derived, would show in the clear any part of a password or mnemonic typed in that gap.
+pub fn session(run: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::protect_memory();
+        unix::watch_signals()?;
+    }
+    let result = {
+        terminal::enable_raw_mode()?;
+        defer!(end_session());
+        run()
+    };
+    #[cfg(unix)]
+    unix::die_if_signaled()?;
+    result
+}
+
+/// Clears the prompt the session ended on, however it ended, and restores the terminal.
+fn end_session() {
+    let mut stdout = io::stdout();
+    let _ = stdout.queue(cursor::MoveToColumn(0));
+    let _ = stdout.execute(terminal::Clear(ClearType::FromCursorDown));
+    let _ = terminal::disable_raw_mode();
+}
+
 /// Reads the next event. Keys are reported once, when pressed: crossterm also reports key releases
-/// on Windows, so the console is read directly there instead.
+/// on Windows, so the console is read directly there instead. On Unix, this fails once the program
+/// is told to terminate.
 fn read_event() -> io::Result<Event> {
     #[cfg(windows)]
     return windows::read_event();
+    #[cfg(unix)]
+    unix::read_event()
+}
+
+/// Throws away keys that were typed but not read yet.
+pub fn discard_pending_input() -> io::Result<()> {
+    #[cfg(windows)]
+    return windows::discard_pending_input();
     #[cfg(not(windows))]
-    crossterm::event::read()
+    {
+        while crossterm::event::poll(std::time::Duration::ZERO)? {
+            crossterm::event::read()?;
+        }
+        Ok(())
+    }
 }
 
 /// Raw mode turns off the terminal's signal keys, so Ctrl+C arrives as a key event instead of
@@ -161,10 +214,11 @@ pub enum ViewWord {
 }
 
 pub fn view_word(word: &str) -> io::Result<ViewWord> {
-    let mut stdout = io::stdout();
+    // Told to terminate, perhaps while the key was derived: don't show the word even briefly
+    #[cfg(unix)]
+    unix::check_signal()?;
 
-    terminal::enable_raw_mode()?;
-    defer!(terminal::disable_raw_mode());
+    let mut stdout = io::stdout();
 
     stdout.execute(terminal::DisableLineWrap)?;
     defer!(io::stdout().execute(terminal::EnableLineWrap));
@@ -196,11 +250,8 @@ pub enum EditPwd {
     Exit,
 }
 
-pub fn edit_pwd(buf: &mut String, mask: &str) -> io::Result<EditPwd> {
+pub fn edit_pwd(buf: &mut SecretString, mask: &str) -> io::Result<EditPwd> {
     let mut stdout = io::stdout();
-
-    terminal::enable_raw_mode()?;
-    defer!(terminal::disable_raw_mode());
 
     stdout.execute(terminal::DisableLineWrap)?;
     defer!(io::stdout().execute(terminal::EnableLineWrap));
@@ -248,11 +299,8 @@ pub enum EditWord {
     Exit,
 }
 
-pub fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
+pub fn edit_word(buf: &mut SecretString, mask: &str) -> io::Result<EditWord> {
     let mut stdout = io::stdout();
-
-    terminal::enable_raw_mode()?;
-    defer!(terminal::disable_raw_mode());
 
     stdout.execute(terminal::DisableLineWrap)?;
     defer!(io::stdout().execute(terminal::EnableLineWrap));
@@ -324,8 +372,15 @@ mod tests {
 
     #[test]
     fn words_are_lowercased_and_joined() {
-        let words = ["Abandon", "ABOUT", "zoo"].map(String::from);
-        assert_eq!(join_words(&words), "abandon about zoo");
+        let words = ["Abandon", "ABOUT", "zoo"].map(|word| {
+            let mut secret = SecretString::new();
+            word.chars().for_each(|ch| secret.push(ch));
+            secret
+        });
+        let joined = join_words(&words);
+        assert_eq!(*joined, "abandon about zoo");
+        // Built in place, without growing
+        assert!(joined.capacity() <= "abandon about zoo ".len());
     }
 
     #[test]

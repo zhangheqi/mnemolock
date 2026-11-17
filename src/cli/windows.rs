@@ -128,6 +128,18 @@ pub fn read_event() -> std::io::Result<crossterm::event::Event> {
     }
 }
 
+/// Throws away input that is waiting to be read.
+#[cfg(windows)]
+pub fn discard_pending_input() -> std::io::Result<()> {
+    use crossterm_winapi::{Console, Handle};
+
+    let console = Console::from(Handle::current_in_handle()?);
+    while console.number_of_console_input_events()? > 0 {
+        console.read_single_input_event()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

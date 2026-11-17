@@ -1,15 +1,21 @@
 use std::cmp::Ordering;
-use std::io;
+use std::{array, io};
 use bip39::Mnemonic;
 use mnemolock::{EncryptedMnemonic24, EncryptedMnemonic36};
-use crate::cli::util::BoundedIndex;
-use crate::cli::{self, EditPwd, EditWord, INPUT_MASK, InputFrame, MnemonicType, ViewWord};
+use crate::cli::util::{BoundedIndex, SecretString};
+use crate::cli::{self, util, EditPwd, EditWord, INPUT_MASK, InputFrame, MnemonicType, ViewWord};
 
 /// Passwords shorter than this get a warning, since a weak password is all that protects the
 /// encrypted mnemonic from anyone who finds it.
 const MIN_RECOMMENDED_PWD_LEN: usize = 8;
 
-pub fn encrypt() -> io::Result<()> {
+/// Asks for a mnemonic and a password to encrypt it with. Returns the encrypted words, or `None`
+/// if the user quits.
+///
+/// Everything secret stays in here, and this is kept out of the caller's stack frame, so that
+/// `wipe_stack` reaches what is left behind.
+#[inline(never)]
+fn enter_and_encrypt() -> io::Result<Option<Vec<&'static str>>> {
     let (mnemonic, mnemonic_type) = {
         let frame = InputFrame::new(
             "Enter your mnemonic.",
@@ -20,7 +26,8 @@ pub fn encrypt() -> io::Result<()> {
                 ("Esc", "Exit"),
             ],
         );
-        let mut words: [String; MnemonicType::Mnemonic24.word_count()] = Default::default();
+        let mut words: [SecretString; MnemonicType::Mnemonic24.word_count()] =
+            array::from_fn(|_| SecretString::new());
         let mut word_no = BoundedIndex::new(
             1,
             1,
@@ -47,7 +54,7 @@ pub fn encrypt() -> io::Result<()> {
                                 Ordering::Equal => {
                                     if words[MnemonicType::Mnemonic12.word_count() + 1..MnemonicType::Mnemonic24.word_count()]
                                         .iter()
-                                        .all(String::is_empty)
+                                        .all(|word| word.is_empty())
                                     {
                                         mnemonic_type = Some(MnemonicType::Mnemonic12);
                                     } else {
@@ -88,7 +95,7 @@ pub fn encrypt() -> io::Result<()> {
                     }
                 }
                 EditWord::Reload => frame.reload()?,
-                EditWord::Exit => InputFrame::exit(),
+                EditWord::Exit => return Ok(None),
             }
         }
     };
@@ -102,7 +109,7 @@ pub fn encrypt() -> io::Result<()> {
         );
         frame.init()?;
         loop {
-            let mut pwd = String::new();
+            let mut pwd = SecretString::new();
             let words = loop {
                 cli::print_prompt("Enter Password")?;
                 match cli::edit_pwd(&mut pwd, INPUT_MASK)? {
@@ -131,10 +138,10 @@ pub fn encrypt() -> io::Result<()> {
                         }
                     }
                     EditPwd::Reload => frame.reload()?,
-                    EditPwd::Exit => InputFrame::exit(),
+                    EditPwd::Exit => return Ok(None),
                 }
             };
-            let mut repeat_pwd = String::new();
+            let mut repeat_pwd = SecretString::new();
             loop {
                 cli::print_prompt("Repeat Password")?;
                 match cli::edit_pwd(&mut repeat_pwd, INPUT_MASK)? {
@@ -143,16 +150,25 @@ pub fn encrypt() -> io::Result<()> {
                         break;
                     }
                     EditPwd::Reload => frame.reload()?,
-                    EditPwd::Exit => InputFrame::exit(),
+                    EditPwd::Exit => return Ok(None),
                 }
             };
-            if pwd == repeat_pwd {
+            if *pwd == *repeat_pwd {
                 frame.finish()?;
                 break words;
             }
             InputFrame::reload_with_error("Password does not match.")?;
         }
     };
+    Ok(Some(words))
+}
+
+pub fn encrypt() -> io::Result<()> {
+    let Some(words) = enter_and_encrypt()? else {
+        return Ok(());
+    };
+    // Nothing secret is needed from here on, and writing the words down takes a while
+    util::wipe_stack();
     {
         let frame = InputFrame::new(
             format!(
@@ -187,7 +203,7 @@ pub fn encrypt() -> io::Result<()> {
                     break;
                 }
                 ViewWord::Reload => frame.reload()?,
-                ViewWord::Exit => InputFrame::exit(),
+                ViewWord::Exit => return Ok(()),
             }
         }
     }
