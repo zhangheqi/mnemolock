@@ -83,7 +83,7 @@ pub fn decrypt() -> io::Result<()> {
                     }
                 }
                 EditWord::Reload => frame.reload()?,
-                EditWord::Exit => InputFrame::exit(),
+                EditWord::Exit => return Ok(()),
             }
         }
     };
@@ -103,6 +103,9 @@ pub fn decrypt() -> io::Result<()> {
                 EditPwd::Submit => {
                     match mnemonic.decrypt(pwd.as_bytes()) {
                         Ok(decrypted) => {
+                            // Keys typed while the key was derived were not meant for the
+                            // words shown next, where a stray Enter would dismiss them unseen
+                            cli::discard_pending_input()?;
                             frame.reload()?;
                             break decrypted.words().collect::<Vec<_>>();
                         }
@@ -110,7 +113,7 @@ pub fn decrypt() -> io::Result<()> {
                     }
                 }
                 EditPwd::Reload => frame.reload()?,
-                EditPwd::Exit => InputFrame::exit(),
+                EditPwd::Exit => return Ok(()),
             }
         }
     };
@@ -148,7 +151,7 @@ pub fn decrypt() -> io::Result<()> {
                     break;
                 }
                 ViewWord::Reload => frame.reload()?,
-                ViewWord::Exit => InputFrame::exit(),
+                ViewWord::Exit => return Ok(()),
             }
         }
     }

@@ -88,7 +88,7 @@ pub fn encrypt() -> io::Result<()> {
                     }
                 }
                 EditWord::Reload => frame.reload()?,
-                EditWord::Exit => InputFrame::exit(),
+                EditWord::Exit => return Ok(()),
             }
         }
     };
@@ -131,7 +131,7 @@ pub fn encrypt() -> io::Result<()> {
                         }
                     }
                     EditPwd::Reload => frame.reload()?,
-                    EditPwd::Exit => InputFrame::exit(),
+                    EditPwd::Exit => return Ok(()),
                 }
             };
             let mut repeat_pwd = String::new();
@@ -143,7 +143,7 @@ pub fn encrypt() -> io::Result<()> {
                         break;
                     }
                     EditPwd::Reload => frame.reload()?,
-                    EditPwd::Exit => InputFrame::exit(),
+                    EditPwd::Exit => return Ok(()),
                 }
             };
             if pwd == repeat_pwd {
@@ -187,7 +187,7 @@ pub fn encrypt() -> io::Result<()> {
                     break;
                 }
                 ViewWord::Reload => frame.reload()?,
-                ViewWord::Exit => InputFrame::exit(),
+                ViewWord::Exit => return Ok(()),
             }
         }
     }

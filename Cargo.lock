@@ -441,6 +441,7 @@ dependencies = [
  "clap",
  "crossterm",
  "crossterm_winapi",
+ "rustix",
 ]
 
 [[package]]

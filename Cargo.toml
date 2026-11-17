@@ -12,3 +12,6 @@ crossterm = "0.29"
 
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", features = ["pty"] }

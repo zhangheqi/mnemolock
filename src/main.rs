@@ -20,8 +20,8 @@ enum Commands {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    cli::session(|| match cli.command {
         Commands::Encrypt => cli::encrypt::encrypt(),
         Commands::Decrypt => cli::decrypt::decrypt(),
-    }
+    })
 }
