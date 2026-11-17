@@ -166,11 +166,13 @@ fn end_session() {
     let _ = stdout.queue(cursor::MoveToColumn(0));
     let _ = stdout.execute(terminal::Clear(ClearType::FromCursorDown));
     let _ = terminal::disable_raw_mode();
+    #[cfg(unix)]
+    unix::wipe_input();
 }
 
-/// Reads the next event. Keys are reported once, when pressed: crossterm also reports key releases
-/// on Windows, so the console is read directly there instead. On Unix, this fails once the program
-/// is told to terminate.
+/// Reads the next event. Keys are reported once, when pressed. The keyboard isn't read through
+/// crossterm: on Windows it also reports key releases, and on Unix it keeps what was typed in
+/// memory. On Unix, this fails once the program is told to terminate.
 fn read_event() -> io::Result<Event> {
     #[cfg(windows)]
     return windows::read_event();
@@ -182,13 +184,17 @@ fn read_event() -> io::Result<Event> {
 pub fn discard_pending_input() -> io::Result<()> {
     #[cfg(windows)]
     return windows::discard_pending_input();
-    #[cfg(not(windows))]
-    {
-        while crossterm::event::poll(std::time::Duration::ZERO)? {
-            crossterm::event::read()?;
-        }
-        Ok(())
-    }
+    #[cfg(unix)]
+    unix::discard_pending_input()
+}
+
+/// Asks the terminal where the cursor is: column and row, counted from 0. On Unix, the answer
+/// comes in with the keys, so it is read the same way they are.
+fn cursor_position() -> io::Result<(u16, u16)> {
+    #[cfg(windows)]
+    return cursor::position();
+    #[cfg(unix)]
+    unix::cursor_position()
 }
 
 /// Raw mode turns off the terminal's signal keys, so Ctrl+C arrives as a key event instead of
@@ -259,7 +265,7 @@ pub fn edit_pwd(buf: &mut SecretString, mask: &str) -> io::Result<EditPwd> {
     let mut cursor_checkpoints = Vec::new();
 
     for _ in 0..buf.chars().count() {
-        cursor_checkpoints.push(cursor::position()?);
+        cursor_checkpoints.push(cursor_position()?);
         stdout.execute(style::Print(mask))?;
     }
 
@@ -269,7 +275,7 @@ pub fn edit_pwd(buf: &mut SecretString, mask: &str) -> io::Result<EditPwd> {
             Event::Key(event) => match event.code {
                 KeyCode::Char(ch) if is_text(&event) => {
                     buf.push(ch);
-                    cursor_checkpoints.push(cursor::position()?);
+                    cursor_checkpoints.push(cursor_position()?);
                     stdout.execute(style::Print(mask))?;
                 }
                 KeyCode::Backspace => {
@@ -308,7 +314,7 @@ pub fn edit_word(buf: &mut SecretString, mask: &str) -> io::Result<EditWord> {
     let mut cursor_checkpoints = Vec::new();
 
     for _ in 0..buf.chars().count() {
-        cursor_checkpoints.push(cursor::position()?);
+        cursor_checkpoints.push(cursor_position()?);
         stdout.execute(style::Print(mask))?;
     }
 
@@ -321,7 +327,7 @@ pub fn edit_word(buf: &mut SecretString, mask: &str) -> io::Result<EditWord> {
                         return Ok(EditWord::Next);
                     }
                     buf.push(ch);
-                    cursor_checkpoints.push(cursor::position()?);
+                    cursor_checkpoints.push(cursor_position()?);
                     stdout.execute(style::Print(mask))?;
                 }
                 KeyCode::Backspace => {

@@ -16,7 +16,7 @@ polyval = { version = "0.6", features = ["zeroize"] }
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["event", "process", "stdio"] }
 signal-hook = { version = "0.3", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
