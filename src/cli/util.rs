@@ -77,8 +77,7 @@ pub fn wipe_stack() {
 /// A `String` that outgrows its buffer moves to a bigger one, and the old one is freed with the
 /// text still in it. This wipes the old buffer when it grows.
 ///
-/// This doesn't reach the keys as crossterm read them: its input buffer and event queue keep the
-/// most recent ones until later input overwrites them.
+/// The keys themselves are wiped as they are read: see `cli::unix::input`.
 pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {
