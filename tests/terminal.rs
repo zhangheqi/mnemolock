@@ -4,22 +4,30 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use rustix::fs::{self, Mode, OFlags};
+use rustix::process::{self, Pid, Signal};
 use rustix::pty::{self, OpenptFlags};
+use rustix::termios::{self, LocalModes};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+/// `MNEMONIC`, encrypted with `ENCRYPTED_PASSWORD`
+const ENCRYPTED: &str = "feature chapter top slight shrimp ranch combine tomato bike canvas volume vendor upper rich very rhythm aspect leaf fame trouble salad bench slow peasant";
+const ENCRYPTED_PASSWORD: &str = "correct horse battery staple";
 /// None of these letters appears in the program's own text, so seeing one means it was echoed.
 const PASSWORD: &str = "QJZXKQJZXK";
 
 struct Terminal {
     child: Child,
     master: File,
+    slave: OwnedFd,
     /// Everything the terminal was given to show
     output: Arc<Mutex<Vec<u8>>>,
 }
@@ -35,7 +43,7 @@ impl Terminal {
             .arg(command)
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
-            .stderr(slave)
+            .stderr(slave.try_clone().unwrap())
             .spawn()
             .unwrap();
         let master = File::from(master);
@@ -61,7 +69,7 @@ impl Terminal {
             }
         });
 
-        Self { child, master, output }
+        Self { child, master, slave, output }
     }
 
     fn send(&mut self, keys: &str) {
@@ -86,23 +94,28 @@ impl Terminal {
         String::from_utf8_lossy(&text).into_owned()
     }
 
-    fn wait_for(&self, text: &str) {
+    /// Everything the terminal was given to show so far, escape sequences included.
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+    }
+
+    fn wait_until<T>(&mut self, what: &str, mut check: impl FnMut(&mut Self) -> Option<T>) -> T {
         let start = Instant::now();
-        while !self.shown().contains(text) {
-            assert!(start.elapsed() < TIMEOUT, "{text:?} was never shown: {:?}", self.shown());
+        loop {
+            if let Some(value) = check(self) {
+                return value;
+            }
+            assert!(start.elapsed() < TIMEOUT, "timed out waiting for {what}: {:?}", self.shown());
             thread::sleep(Duration::from_millis(5));
         }
     }
 
+    fn wait_for(&mut self, text: &str) {
+        self.wait_until(text, |terminal| terminal.shown().contains(text).then_some(()))
+    }
+
     fn wait_for_exit(&mut self) -> ExitStatus {
-        let start = Instant::now();
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
-            }
-            assert!(start.elapsed() < TIMEOUT, "the program is still running: {:?}", self.shown());
-            thread::sleep(Duration::from_millis(5));
-        }
+        self.wait_until("the program to exit", |terminal| terminal.child.try_wait().unwrap())
     }
 }
 
@@ -138,4 +151,31 @@ fn keys_typed_while_the_key_is_derived_are_not_echoed() {
 
     let shown = terminal.shown();
     assert!(!shown.contains(|ch| PASSWORD.contains(ch)), "the password was echoed: {shown:?}");
+}
+
+#[test]
+fn termination_clears_the_screen_and_restores_the_terminal() {
+    let mut terminal = Terminal::run("decrypt");
+    terminal.wait_for("Enter your encrypted mnemonic");
+    terminal.send(ENCRYPTED);
+    terminal.send("\r");
+    terminal.wait_for("Enter the password");
+    terminal.send(ENCRYPTED_PASSWORD);
+    terminal.send("\r");
+    terminal.wait_for("Word 1: abandon");
+
+    process::kill_process(Pid::from_child(&terminal.child), Signal::TERM).unwrap();
+    let status = terminal.wait_for_exit();
+
+    // The signal still takes effect, once the program has cleaned up
+    assert_eq!(status.signal(), Some(Signal::TERM.as_raw()));
+    // The line with the word is erased: back to the first column, then clear to the end
+    terminal.wait_until("the word to be erased", |terminal| {
+        let output = terminal.output();
+        let (_, after_word) = output.rsplit_once("abandon")?;
+        after_word.contains("\x1b[1G\x1b[J").then_some(())
+    });
+    // The terminal is back out of raw mode
+    let modes = termios::tcgetattr(&terminal.slave).unwrap().local_modes;
+    assert!(modes.contains(LocalModes::ECHO | LocalModes::ICANON));
 }

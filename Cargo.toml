@@ -10,8 +10,11 @@ bip39 = "2.2"
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"
 
 [target.'cfg(unix)'.dev-dependencies]
-rustix = { version = "1", features = ["pty"] }
+rustix = { version = "1", features = ["process", "pty", "termios"] }

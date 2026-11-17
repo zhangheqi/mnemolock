@@ -442,6 +442,7 @@ dependencies = [
  "crossterm",
  "crossterm_winapi",
  "rustix",
+ "signal-hook",
 ]
 
 [[package]]

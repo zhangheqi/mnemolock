@@ -1,6 +1,8 @@
 pub mod decrypt;
 pub mod encrypt;
 pub mod util;
+#[cfg(unix)]
+mod unix;
 #[cfg(any(windows, test))]
 mod windows;
 
@@ -128,9 +130,16 @@ impl InputFrame {
 /// Outside raw mode the terminal echoes whatever is typed. Leaving it between prompts, or while a
 /// key is derived, would show in the clear any part of a password or mnemonic typed in that gap.
 pub fn session(run: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-    terminal::enable_raw_mode()?;
-    defer!(end_session());
-    run()
+    #[cfg(unix)]
+    unix::watch_signals()?;
+    let result = {
+        terminal::enable_raw_mode()?;
+        defer!(end_session());
+        run()
+    };
+    #[cfg(unix)]
+    unix::die_if_signaled()?;
+    result
 }
 
 /// Clears the prompt the session ended on, however it ended, and restores the terminal.
@@ -142,12 +151,13 @@ fn end_session() {
 }
 
 /// Reads the next event. Keys are reported once, when pressed: crossterm also reports key releases
-/// on Windows, so the console is read directly there instead.
+/// on Windows, so the console is read directly there instead. On Unix, this fails once the program
+/// is told to terminate.
 fn read_event() -> io::Result<Event> {
     #[cfg(windows)]
     return windows::read_event();
-    #[cfg(not(windows))]
-    crossterm::event::read()
+    #[cfg(unix)]
+    unix::read_event()
 }
 
 /// Throws away keys that were typed but not read yet.
@@ -186,6 +196,10 @@ pub enum ViewWord {
 }
 
 pub fn view_word(word: &str) -> io::Result<ViewWord> {
+    // Told to terminate, perhaps while the key was derived: don't show the word even briefly
+    #[cfg(unix)]
+    unix::check_signal()?;
+
     let mut stdout = io::stdout();
 
     stdout.execute(terminal::DisableLineWrap)?;
