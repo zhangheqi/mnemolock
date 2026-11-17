@@ -4,17 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# aes and polyval are not used directly. aes-gcm-siv is built on them, and they are named here to
+# turn on wiping their keys from memory.
+aes = { version = "0.8", features = ["zeroize"] }
 aes-gcm-siv = "0.11"
-argon2 = "0.5"
-bip39 = "2.2"
+argon2 = { version = "0.5", features = ["zeroize"] }
+bip39 = { version = "2.2", features = ["zeroize"] }
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29"
+polyval = { version = "0.6", features = ["zeroize"] }
+zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
 signal-hook = { version = "0.3", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"
 
 [target.'cfg(unix)'.dev-dependencies]
-rustix = { version = "1", features = ["process", "pty", "termios"] }
+rustix = { version = "1", features = ["pty", "termios"] }

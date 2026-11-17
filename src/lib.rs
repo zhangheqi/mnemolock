@@ -5,6 +5,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use bip39::Mnemonic;
 use error::{Error, Result};
 use std::ops::{Index, RangeFrom, RangeFull, RangeTo};
+use zeroize::Zeroizing;
 
 const SALT: &[u8; 22] = b"Uom1dTQVPOMypdOKji8axA";
 const NONCE: &[u8; 12] = b"j+d5//euNzoM";
@@ -19,9 +20,10 @@ const KEY_LEN: usize = 32;
 
 fn cipher(pwd: &[u8]) -> Result<Aes256GcmSiv> {
     let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(KEY_LEN))?;
-    let mut key = [0u8; KEY_LEN];
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params).hash_password_into(pwd, SALT, &mut key)?;
-    Ok(Aes256GcmSiv::new(Key::<Aes256GcmSiv>::from_slice(&key)))
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(pwd, SALT, key.as_mut_slice())?;
+    Ok(Aes256GcmSiv::new(Key::<Aes256GcmSiv>::from_slice(key.as_slice())))
 }
 
 pub trait Entropy
@@ -66,7 +68,9 @@ pub struct _EncryptedMnemonic<E: Entropy> {
 impl<E: Entropy> _EncryptedMnemonic<E> {
     pub fn new(mnemonic: &Mnemonic, pwd: &[u8]) -> Result<Self> {
         let nonce = Nonce::from_slice(NONCE);
-        let ciphertext = cipher(pwd)?.encrypt(nonce, mnemonic.to_entropy().as_ref()).unwrap();
+        let entropy = Zeroizing::new(mnemonic.to_entropy_array());
+        let (entropy, len) = &*entropy;
+        let ciphertext = cipher(pwd)?.encrypt(nonce, &entropy[..*len]).unwrap();
         Ok(
             Self {
                 entropy: ciphertext.try_into().map_err(|_| Error::BadWordCount)?,
@@ -76,7 +80,8 @@ impl<E: Entropy> _EncryptedMnemonic<E> {
 
     pub fn decrypt(&self, pwd: &[u8]) -> Result<Mnemonic> {
         let nonce = Nonce::from_slice(NONCE);
-        Ok(Mnemonic::from_entropy(cipher(pwd)?.decrypt(nonce, &self.entropy[..])?.as_ref()).unwrap())
+        let entropy = Zeroizing::new(cipher(pwd)?.decrypt(nonce, &self.entropy[..])?);
+        Ok(Mnemonic::from_entropy(&entropy).unwrap())
     }
 }
 

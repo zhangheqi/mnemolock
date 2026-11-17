@@ -1,10 +1,16 @@
 use std::cmp::Ordering;
 use std::{array, io};
 use mnemolock::{EncryptedMnemonic24, EncryptedMnemonic36};
-use crate::cli::util::BoundedIndex;
-use crate::cli::{self, EditPwd, EditWord, INPUT_MASK, InputFrame, MnemonicType, ViewWord};
+use crate::cli::util::{BoundedIndex, SecretString};
+use crate::cli::{self, util, EditPwd, EditWord, INPUT_MASK, InputFrame, MnemonicType, ViewWord};
 
-pub fn decrypt() -> io::Result<()> {
+/// Asks for an encrypted mnemonic and its password. Returns the decrypted words, or `None` if the
+/// user quits.
+///
+/// The password and the key stay in here, and this is kept out of the caller's stack frame, so
+/// that `wipe_stack` reaches what is left behind.
+#[inline(never)]
+fn enter_and_decrypt() -> io::Result<Option<Vec<&'static str>>> {
     let mnemonic = {
         let frame = InputFrame::new(
             "Enter your encrypted mnemonic.",
@@ -15,7 +21,8 @@ pub fn decrypt() -> io::Result<()> {
                 ("Esc", "Exit"),
             ],
         );
-        let mut words: [String; MnemonicType::Mnemonic24.encrypted_word_count()] = array::repeat(String::new());
+        let mut words: [SecretString; MnemonicType::Mnemonic24.encrypted_word_count()] =
+            array::from_fn(|_| SecretString::new());
         let mut word_no = BoundedIndex::new(
             1,
             1,
@@ -42,7 +49,7 @@ pub fn decrypt() -> io::Result<()> {
                                 Ordering::Equal => {
                                     if words[MnemonicType::Mnemonic12.encrypted_word_count() + 1..MnemonicType::Mnemonic24.encrypted_word_count()]
                                         .iter()
-                                        .all(String::is_empty)
+                                        .all(|word| word.is_empty())
                                     {
                                         mnemonic_type = Some(MnemonicType::Mnemonic12);
                                     } else {
@@ -83,7 +90,7 @@ pub fn decrypt() -> io::Result<()> {
                     }
                 }
                 EditWord::Reload => frame.reload()?,
-                EditWord::Exit => return Ok(()),
+                EditWord::Exit => return Ok(None),
             }
         }
     };
@@ -95,7 +102,7 @@ pub fn decrypt() -> io::Result<()> {
                 ("Esc", "Exit"),
             ],
         );
-        let mut pwd = String::new();
+        let mut pwd = SecretString::new();
         frame.init()?;
         loop {
             cli::print_prompt("Enter Password")?;
@@ -113,10 +120,19 @@ pub fn decrypt() -> io::Result<()> {
                     }
                 }
                 EditPwd::Reload => frame.reload()?,
-                EditPwd::Exit => return Ok(()),
+                EditPwd::Exit => return Ok(None),
             }
         }
     };
+    Ok(Some(words))
+}
+
+pub fn decrypt() -> io::Result<()> {
+    let Some(words) = enter_and_decrypt()? else {
+        return Ok(());
+    };
+    // The password and the key are no longer needed, and reading the words takes a while
+    util::wipe_stack();
     {
         let frame = InputFrame::new(
             format!(

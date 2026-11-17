@@ -1,4 +1,4 @@
-//! Termination signals on Unix.
+//! Termination signals on Unix, and keeping memory private.
 //!
 //! Left alone, a signal such as SIGTERM kills the program on the spot: the terminal stays in raw
 //! mode, and a decrypted word that was being shown stays on screen. So the signals are caught
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use crossterm::event::{self, Event};
+use rustix::process::{self, Resource, Rlimit};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 
 /// How long a signal can go unnoticed while waiting for input.
@@ -18,6 +19,17 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The signal received, or 0.
 static RECEIVED: LazyLock<Arc<AtomicUsize>> = LazyLock::new(Arc::default);
+
+/// Keeps the program's memory, and the secrets in it, out of core dumps. On Linux, this also
+/// keeps other programs of the same user from reading it, as a debugger would.
+///
+/// This is best effort: failing here is no reason to keep someone from their mnemonic.
+pub fn protect_memory() {
+    let no_core_dump = Rlimit { current: Some(0), maximum: Some(0) };
+    let _ = process::setrlimit(Resource::Core, no_core_dump);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let _ = process::set_dumpable_behavior(process::DumpableBehavior::NotDumpable);
+}
 
 /// Starts noting termination signals instead of dying by them.
 pub fn watch_signals() -> io::Result<()> {

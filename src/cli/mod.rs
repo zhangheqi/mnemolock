@@ -13,6 +13,8 @@ use crossterm::style::{self, Stylize};
 use crossterm::terminal::{self, ClearType};
 use crossterm::QueueableCommand;
 use mnemolock::error::Error;
+use zeroize::Zeroizing;
+use crate::cli::util::SecretString;
 use crate::defer;
 
 pub const INPUT_MASK: &str = "● ";
@@ -40,8 +42,21 @@ impl MnemonicType {
 
 /// Joins mnemonic words for parsing. BIP39 words only match in lowercase, and the input is masked,
 /// so someone typing with Caps Lock on couldn't see what's wrong.
-pub fn join_words(words: &[String]) -> String {
-    words.iter().map(|word| word.to_lowercase()).collect::<Vec<_>>().join(" ")
+pub fn join_words(words: &[SecretString]) -> Zeroizing<String> {
+    fn lowercase(word: &str) -> impl Iterator<Item = char> {
+        word.chars().flat_map(char::to_lowercase)
+    }
+    // Make room for everything first. A string that grows as it's built moves, and leaves copies
+    // of the words behind in freed memory.
+    let len = words.iter().map(|word| lowercase(word).map(char::len_utf8).sum::<usize>() + 1).sum();
+    let mut joined = Zeroizing::new(String::with_capacity(len));
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            joined.push(' ');
+        }
+        joined.extend(lowercase(word));
+    }
+    joined
 }
 
 /// Explains why a mnemonic was rejected. The words are masked, so point at the wrong one if we can.
@@ -131,7 +146,10 @@ impl InputFrame {
 /// key is derived, would show in the clear any part of a password or mnemonic typed in that gap.
 pub fn session(run: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     #[cfg(unix)]
-    unix::watch_signals()?;
+    {
+        unix::protect_memory();
+        unix::watch_signals()?;
+    }
     let result = {
         terminal::enable_raw_mode()?;
         defer!(end_session());
@@ -232,7 +250,7 @@ pub enum EditPwd {
     Exit,
 }
 
-pub fn edit_pwd(buf: &mut String, mask: &str) -> io::Result<EditPwd> {
+pub fn edit_pwd(buf: &mut SecretString, mask: &str) -> io::Result<EditPwd> {
     let mut stdout = io::stdout();
 
     stdout.execute(terminal::DisableLineWrap)?;
@@ -281,7 +299,7 @@ pub enum EditWord {
     Exit,
 }
 
-pub fn edit_word(buf: &mut String, mask: &str) -> io::Result<EditWord> {
+pub fn edit_word(buf: &mut SecretString, mask: &str) -> io::Result<EditWord> {
     let mut stdout = io::stdout();
 
     stdout.execute(terminal::DisableLineWrap)?;
@@ -354,8 +372,15 @@ mod tests {
 
     #[test]
     fn words_are_lowercased_and_joined() {
-        let words = ["Abandon", "ABOUT", "zoo"].map(String::from);
-        assert_eq!(join_words(&words), "abandon about zoo");
+        let words = ["Abandon", "ABOUT", "zoo"].map(|word| {
+            let mut secret = SecretString::new();
+            word.chars().for_each(|ch| secret.push(ch));
+            secret
+        });
+        let joined = join_words(&words);
+        assert_eq!(*joined, "abandon about zoo");
+        // Built in place, without growing
+        assert!(joined.capacity() <= "abandon about zoo ".len());
     }
 
     #[test]
